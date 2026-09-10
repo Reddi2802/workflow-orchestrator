@@ -8,6 +8,17 @@ runs as a background asyncio task inside the FastAPI process (consistent
 with the "engine runs in-process" architecture decision), started via the
 app's lifespan hook. If this should instead be a separate process or
 APScheduler, this file needs to change before it's relied on.
+
+Concurrency note (fixed after Week 1): poll_and_trigger_sync is a plain
+synchronous function, not async — every DB call inside it uses SQLAlchemy's
+sync Session, which blocks on real network I/O to Postgres. It was
+originally mislabeled `async def` despite never awaiting anything, which
+would have blocked the app's single event loop (and therefore Paramash's
+sync CRUD routes, which FastAPI runs in its own threadpool but still
+share the same loop for scheduling) during every poll cycle. Fixed by
+keeping this function honestly synchronous and running it inside a worker
+thread via asyncio.to_thread from run_polling_loop, instead of awaiting
+it directly on the event loop.
 """
 from __future__ import annotations
 
@@ -113,10 +124,18 @@ def _active_run_count(db: Session, workflow_id: int) -> int:
     ).scalars().all().__len__()
 
 
-async def poll_and_trigger(db: Session) -> list[WorkflowRun]:
+def poll_and_trigger_sync(db: Session) -> list[WorkflowRun]:
     """
     One polling cycle: find due workflows, create a WorkflowRun for each —
     unless doing so would exceed that workflow's max_active_runs.
+
+    Synchronous by design — every call inside here (get_due_workflows,
+    _active_run_count, trigger_workflow_run) uses a blocking SQLAlchemy
+    Session, matching Paramash's CRUD layer (plain `def` routes, sync
+    Session throughout). Call this via asyncio.to_thread from
+    run_polling_loop so it doesn't block the event loop that also serves
+    CRUD requests — do not call it directly with `await`, it is not a
+    coroutine.
 
     Enforced here, not deferred: if a workflow's previous run is still
     PENDING or RUNNING and its count already meets max_active_runs, this
@@ -166,11 +185,17 @@ async def run_polling_loop(
 
     stop_event lets tests and app shutdown terminate the loop cleanly
     instead of it running forever inside a test process.
+
+    poll_and_trigger_sync is run via asyncio.to_thread, not awaited
+    directly — it's a blocking sync function (see its docstring), and
+    running it straight on this coroutine would block the event loop for
+    the duration of every poll cycle's DB queries, stalling any concurrent
+    HTTP requests the same app is serving.
     """
     while stop_event is None or not stop_event.is_set():
         db = session_factory()
         try:
-            await poll_and_trigger(db)
+            await asyncio.to_thread(poll_and_trigger_sync, db)
         except Exception:
             logger.exception("Polling cycle failed")
         finally:

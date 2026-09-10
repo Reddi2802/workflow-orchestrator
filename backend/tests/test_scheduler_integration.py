@@ -1,9 +1,15 @@
 # tests/test_scheduler_integration.py
 """
-Integration tests for get_due_workflows / poll_and_trigger — these need a
-real Postgres session because they query real Workflow/WorkflowRun rows.
-Not unit tests: no mocking of the DB layer, since a mock here would only
-prove the code calls session.execute(), not that the query is correct.
+Integration tests for get_due_workflows / poll_and_trigger_sync — these
+need a real Postgres session because they query real Workflow/WorkflowRun
+rows. Not unit tests: no mocking of the DB layer, since a mock here would
+only prove the code calls session.execute(), not that the query is correct.
+
+poll_and_trigger_sync is a plain sync function (see scheduler.py) — it's
+called via asyncio.to_thread from run_polling_loop in the real app, so
+the event loop isn't blocked during a poll cycle. In these tests we call
+it directly and synchronously; there's nothing to await here, since the
+function itself does no async work.
 
 Requires the real Docker Postgres container running with migrations
 applied (docker compose up -d && alembic upgrade head), same as the rest
@@ -12,7 +18,7 @@ of the project's "verify at the database level" standard.
 
 from datetime import datetime, timedelta
 
-from app.engine.scheduler import get_due_workflows, poll_and_trigger
+from app.engine.scheduler import get_due_workflows, poll_and_trigger_sync
 from app.models.entities import Workflow, WorkflowRun
 from app.models.enums import WorkflowRunStatus, TriggerType
 
@@ -60,16 +66,16 @@ def test_get_due_workflows_excludes_workflow_with_no_cron(db_session):
     assert workflow.id not in [w.id for w in due]
 
 
-async def test_poll_and_trigger_creates_workflow_run(db_session):
+def test_poll_and_trigger_creates_workflow_run(db_session):
     # Create the workflow slightly in the past so that its next
-    # cron execution has already occurred by the time poll_and_trigger()
+    # cron execution has already occurred by the time poll_and_trigger_sync()
     # checks for due workflows.
     workflow = _make_workflow(
         db_session,
         created_at=datetime.utcnow() - timedelta(minutes=2),
     )
 
-    triggered = await poll_and_trigger(db_session)
+    triggered = poll_and_trigger_sync(db_session)
 
     assert any(run.workflow_id == workflow.id for run in triggered)
 
@@ -78,7 +84,7 @@ async def test_poll_and_trigger_creates_workflow_run(db_session):
     assert run.trigger_type == TriggerType.CRON
 
 
-async def test_poll_and_trigger_respects_max_active_runs(db_session):
+def test_poll_and_trigger_respects_max_active_runs(db_session):
     workflow = _make_workflow(db_session, max_active_runs=1)
 
     # Simulate a previous run that's still in flight.
@@ -91,7 +97,7 @@ async def test_poll_and_trigger_respects_max_active_runs(db_session):
     db_session.add(existing_run)
     db_session.commit()
 
-    triggered = await poll_and_trigger(db_session)
+    triggered = poll_and_trigger_sync(db_session)
 
     # max_active_runs=1 already met by the RUNNING run above — no new
     # run should be created for this workflow this cycle.
