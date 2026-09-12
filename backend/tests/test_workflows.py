@@ -49,6 +49,26 @@ def test_create_workflow_rejects_self_dependency(client):
     assert resp.status_code == 422
 
 
+def test_create_workflow_rejects_cycle(client):
+    payload = {
+        "name": "cyclic-workflow",
+        "tasks": [
+            {"name": "task_a", "command": "echo a"},
+            {"name": "task_b", "command": "echo b"},
+        ],
+        "dependencies": [
+            {"upstream_task_name": "task_a", "downstream_task_name": "task_b"},
+            {"upstream_task_name": "task_b", "downstream_task_name": "task_a"},
+        ],
+    }
+
+    resp = client.post("/api/v1/workflows", json=payload)
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "Workflow dependencies must not contain a cycle"
+    assert client.get("/api/v1/workflows").json() == []
+
+
 def test_list_workflows(client):
     client.post("/api/v1/workflows", json=_sample_payload())
     resp = client.get("/api/v1/workflows")
@@ -89,3 +109,54 @@ def test_list_workflow_runs_empty(client):
     resp = client.get(f"/api/v1/workflows/{created['id']}/runs")
     assert resp.status_code == 200
     assert resp.json() == []
+def test_create_workflow_valid_chain(client):
+    payload = {
+        "name": "chain-workflow",
+        "tasks": [
+            {"name": "task_a", "command": "echo a"},
+            {"name": "task_b", "command": "echo b"},
+            {"name": "task_c", "command": "echo c"},
+        ],
+        "dependencies": [
+            {"upstream_task_name": "task_a", "downstream_task_name": "task_b"},
+            {"upstream_task_name": "task_b", "downstream_task_name": "task_c"},
+        ],
+    }
+    resp = client.post("/api/v1/workflows", json=payload)
+    assert resp.status_code == 201
+
+
+def test_create_workflow_direct_cycle_rejected(client):
+    payload = {
+        "name": "cyclic-workflow",
+        "tasks": [
+            {"name": "task_a", "command": "echo a"},
+            {"name": "task_b", "command": "echo b"},
+        ],
+        "dependencies": [
+            {"upstream_task_name": "task_a", "downstream_task_name": "task_b"},
+            {"upstream_task_name": "task_b", "downstream_task_name": "task_a"},
+        ],
+    }
+    resp = client.post("/api/v1/workflows", json=payload)
+    assert resp.status_code == 400
+
+
+def test_create_workflow_diamond_not_false_positive(client):
+    payload = {
+        "name": "diamond-workflow",
+        "tasks": [
+            {"name": "task_a", "command": "echo a"},
+            {"name": "task_b", "command": "echo b"},
+            {"name": "task_c", "command": "echo c"},
+            {"name": "task_d", "command": "echo d"},
+        ],
+        "dependencies": [
+            {"upstream_task_name": "task_a", "downstream_task_name": "task_b"},
+            {"upstream_task_name": "task_a", "downstream_task_name": "task_c"},
+            {"upstream_task_name": "task_b", "downstream_task_name": "task_d"},
+            {"upstream_task_name": "task_c", "downstream_task_name": "task_d"},
+        ],
+    }
+    resp = client.post("/api/v1/workflows", json=payload)
+    assert resp.status_code == 201  # must NOT be rejected as a cycle
