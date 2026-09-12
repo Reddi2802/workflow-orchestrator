@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.database import get_db
+from app.engine.dag import has_cycle
 from app.models.entities import Task, TaskDependency, Workflow, WorkflowRun
 from app.schemas.run import WorkflowRunRead
 from app.schemas.workflow import (
@@ -16,15 +17,25 @@ router = APIRouter(prefix="/api/v1", tags=["workflows"])
 
 @router.post("/workflows", response_model=WorkflowDetailRead, status_code=201)
 def create_workflow(payload: WorkflowCreate, db: Session = Depends(get_db)):
-    """
-    POST /api/v1/workflows
+    """Create a workflow after validating that its task graph is acyclic."""
+    # has_cycle operates on ORM objects by task ID. Assign stable temporary
+    # IDs for validation only — nothing is written to the DB yet, so this
+    # never needs a rollback if it's cyclic.
+    task_ids = {task.name: index for index, task in enumerate(payload.tasks, start=1)}
+    graph_tasks = [Task(id=task_id) for task_id in task_ids.values()]
+    graph_dependencies = [
+        TaskDependency(
+            upstream_task_id=task_ids[dependency.upstream_task_name],
+            downstream_task_id=task_ids[dependency.downstream_task_name],
+        )
+        for dependency in payload.dependencies
+    ]
+    if has_cycle(graph_tasks, graph_dependencies):
+        raise HTTPException(
+            status_code=400,
+            detail="Workflow dependencies must not contain a cycle",
+        )
 
-    NOTE: cycle detection is NOT wired in here yet on purpose — that's a
-    Week 2 task, blocked on Hridhayansh's has_cycle(tasks, dependencies).
-    Once he delivers it, call it on payload.tasks/payload.dependencies
-    BEFORE the db.add() calls below and raise HTTPException(400, ...) if
-    it returns True, so nothing partial gets committed.
-    """
     workflow = Workflow(
         name=payload.name,
         description=payload.description,
@@ -93,8 +104,6 @@ def get_workflow(workflow_id: int, db: Session = Depends(get_db)):
     if workflow is None:
         raise HTTPException(status_code=404, detail="Workflow not found")
 
-    # Section 3 correction: no workflow_id on TaskDependency, so edges for
-    # this workflow are found by joining through its task ids.
     task_ids = [t.id for t in workflow.tasks]
     dependencies = (
         db.query(TaskDependency)
@@ -130,12 +139,8 @@ def delete_workflow(workflow_id: int, db: Session = Depends(get_db)):
     if workflow is None:
         raise HTTPException(status_code=404, detail="Workflow not found")
 
-    # Relies on cascade="all, delete-orphan" on Workflow.tasks/.runs, and
-    # ondelete=CASCADE at the DB level from Task -> TaskDependency and
-    # WorkflowRun -> TaskRun (per Hridhayansh's entities.py).
     db.delete(workflow)
     db.commit()
-    return None
 
 
 @router.get("/workflows/{workflow_id}/runs", response_model=list[WorkflowRunRead])
