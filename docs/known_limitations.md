@@ -6,16 +6,17 @@ in a PR description or a chat thread.
 
 ## 1. `max_active_runs` — real-completion path untested
 
-**Status:** open, blocked on Week 4.
+**Status:** resolved (Week 4).
 
-`max_active_runs` skip logic is verified against a manually-inserted `RUNNING` row
-(unit tests + live verification against real data). It has **not** been verified
-against a run that transitions out of `RUNNING` on its own, because nothing moves
-a `WorkflowRun` out of `RUNNING` until the Week 4 worker pool exists.
-
-**Resolves:** once the worker pool (Week 4) can actually complete a run, add a test
-that starts a run, lets it complete, and confirms a second scheduled run is no
-longer skipped.
+Previously verified only against a manually-inserted `RUNNING` row. The Week 4
+worker pool (`app/engine/worker_pool.py`) is what actually moves a
+`WorkflowRun` out of `RUNNING` for real — `_maybe_finalize_workflow_run`
+sets `SUCCESS`/`FAILED`/`PARTIAL` once every task in the run has reached a
+terminal status. `test_max_active_runs_allows_new_run_after_completion`
+(in `tests/test_worker_pool.py`) starts a run, lets the worker pool
+actually complete it, and confirms `_active_run_count` drops to 0
+afterward — i.e. a second run is no longer blocked. Passing against real
+Docker Postgres + Redis, not a stub.
 
 ## 2. Retry strategy has no persisted column
 
@@ -59,3 +60,40 @@ being drawn independently and risking drift.
 
 No CI pipeline exists yet. Real but lower priority than the modules above;
 tentatively slotted into Week 9 if there's slack, per the original plan.
+
+## 6. `dequeue_task` raises instead of returning `None` on timeout
+
+**Status:** open, needs a fix from Paramash (owns `app/queue/redis_queue.py`).
+
+`dequeue_task`'s own docstring promises it never raises on a plain timeout,
+but under live testing it does: `redis_client.brpop(...)` intermittently
+(in practice, on essentially every empty-queue cycle) raises
+`redis.exceptions.TimeoutError` instead of returning `None`. Likely cause:
+the client's own socket-level read timeout racing the server-side `BRPOP`
+timeout, possibly related to RESP3 protocol handling in this redis-py
+version — root cause not fully confirmed.
+
+**Interim mitigation (Week 4, `app/engine/worker_pool.py`):**
+`_worker_cycle_sync` catches `redis.exceptions.TimeoutError` specifically
+and treats it as an empty cycle, since that's functionally what it is from
+the caller's side. This stops it from crashing a worker or flooding logs,
+but it's a workaround at the call site, not a fix to the actual function.
+
+**Resolves:** `dequeue_task` should catch `redis.exceptions.TimeoutError`
+internally and return `None`, matching its own documented contract:
+
+```python
+def dequeue_task(timeout_seconds: int) -> int | None:
+    try:
+        result = redis_client.brpop(TASK_QUEUE_KEY, timeout=timeout_seconds)
+    except redis.exceptions.TimeoutError:
+        return None
+    if result is None:
+        return None
+    _, value = result
+    return int(value)
+```
+
+Needs its own branch/PR reviewed by Hridhayansh, same as any other change
+to this file — not bundled into the Week 4 worker pool PR, since it's a
+fix to already-merged Week 3 code owned by Paramash, not new Week 4 work.
