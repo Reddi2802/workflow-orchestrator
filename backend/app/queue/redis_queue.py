@@ -19,7 +19,10 @@ def dequeue_task(timeout_seconds: int) -> int | None:
     Returns the id as an int, or None if nothing arrived before the
     timeout — never raises on timeout.
     """
-    result = redis_client.brpop(TASK_QUEUE_KEY, timeout=timeout_seconds)
+    try:
+        result = redis_client.brpop(TASK_QUEUE_KEY, timeout=timeout_seconds)
+    except redis.exceptions.TimeoutError:
+        return None
     if result is None:
         return None
     _, value = result
