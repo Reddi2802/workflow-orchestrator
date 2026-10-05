@@ -67,6 +67,7 @@ class WorkflowRead(BaseModel):
     max_active_runs: int
     created_at: datetime
     updated_at: datetime
+    task_count: int = 0
 
 
 class WorkflowDetailRead(WorkflowRead):

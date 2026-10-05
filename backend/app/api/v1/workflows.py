@@ -90,7 +90,23 @@ def create_workflow(payload: WorkflowCreate, db: Session = Depends(get_db)):
 
 @router.get("/workflows", response_model=list[WorkflowRead])
 def list_workflows(db: Session = Depends(get_db)):
-    return db.query(Workflow).order_by(Workflow.id).all()
+    # Eager-load tasks so we can report a task_count per workflow without
+    # returning the full nested tasks payload — WorkflowRead is meant to
+    # stay a lightweight summary; full task detail lives behind
+    # get_workflow()/WorkflowDetailRead instead.
+    workflows = (
+        db.query(Workflow)
+        .options(selectinload(Workflow.tasks))
+        .order_by(Workflow.id)
+        .all()
+    )
+
+    results = []
+    for workflow in workflows:
+        item = WorkflowRead.model_validate(workflow)
+        item.task_count = len(workflow.tasks)
+        results.append(item)
+    return results
 
 
 @router.get("/workflows/{workflow_id}", response_model=WorkflowDetailRead)
