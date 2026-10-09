@@ -2,6 +2,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from app.models.enums import WorkflowRunStatus
 from app.schemas.task import (
     TaskCreate,
     TaskDependencyCreate,
@@ -68,6 +69,14 @@ class WorkflowRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     task_count: int = 0
+    # Status of this workflow's most recent WorkflowRun, or None if it has
+    # never been run. NOT a real column on Workflow -- Section 3's schema
+    # only puts status on WorkflowRun, deliberately, since a workflow is a
+    # definition and a run is one execution of it. Computed server-side in
+    # the endpoint (see _latest_run_status_by_workflow in api/v1/workflows.py)
+    # specifically so the frontend list view doesn't need one extra request
+    # per workflow just to show a status badge.
+    latest_run_status: WorkflowRunStatus | None = None
 
 
 class WorkflowDetailRead(WorkflowRead):

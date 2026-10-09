@@ -15,6 +15,31 @@ from app.schemas.workflow import (
 router = APIRouter(prefix="/api/v1", tags=["workflows"])
 
 
+def _latest_run_status_by_workflow(db: Session, workflow_ids: list[int]) -> dict[int, str]:
+    """One workflow_id -> most-recent WorkflowRun.status, for every id in
+    workflow_ids. A workflow with no runs yet simply has no key in the
+    result -- callers treat a missing key as "no runs", not as an error.
+
+    DISTINCT ON is Postgres-specific, which is fine here: Section 2 pins
+    Postgres as the DB, and this avoids an N+1 query (one run-lookup per
+    workflow) that an ORM-loop version would otherwise need -- the whole
+    point of computing this server-side instead of making the frontend
+    fetch each workflow's runs separately to render a status badge.
+    DISTINCT ON requires its own column(s) to lead ORDER BY, which is why
+    workflow_id comes before triggered_at here.
+    """
+    if not workflow_ids:
+        return {}
+    rows = (
+        db.query(WorkflowRun.workflow_id, WorkflowRun.status)
+        .filter(WorkflowRun.workflow_id.in_(workflow_ids))
+        .distinct(WorkflowRun.workflow_id)
+        .order_by(WorkflowRun.workflow_id, WorkflowRun.triggered_at.desc())
+        .all()
+    )
+    return {workflow_id: status for workflow_id, status in rows}
+
+
 @router.post("/workflows", response_model=WorkflowDetailRead, status_code=201)
 def create_workflow(payload: WorkflowCreate, db: Session = Depends(get_db)):
     """Create a workflow after validating that its task graph is acyclic."""
@@ -101,10 +126,13 @@ def list_workflows(db: Session = Depends(get_db)):
         .all()
     )
 
+    latest_status = _latest_run_status_by_workflow(db, [w.id for w in workflows])
+
     results = []
     for workflow in workflows:
         item = WorkflowRead.model_validate(workflow)
         item.task_count = len(workflow.tasks)
+        item.latest_run_status = latest_status.get(workflow.id)
         results.append(item)
     return results
 
@@ -131,6 +159,17 @@ def get_workflow(workflow_id: int, db: Session = Depends(get_db)):
 
     result = WorkflowDetailRead.model_validate(workflow)
     result.dependencies = dependencies
+    # task_count and latest_run_status aren't real attributes on the
+    # Workflow ORM model -- model_validate() silently falls back to each
+    # field's schema default (0 / None) for them unless set explicitly
+    # here, the same way list_workflows() already had to for task_count.
+    # Missing this was a real bug: every GET /workflows/{id} response
+    # would otherwise report task_count=0 regardless of actual task
+    # count. Not currently visible in the merged frontend (WorkflowDetail
+    # renders workflow.tasks.length instead of workflow.task_count), but
+    # a landmine for anything that reads it later.
+    result.task_count = len(workflow.tasks)
+    result.latest_run_status = _latest_run_status_by_workflow(db, [workflow.id]).get(workflow.id)
     return result
 
 
