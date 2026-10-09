@@ -25,6 +25,8 @@ from app.api.v1 import runs, workflows
 from app.core.database import SessionLocal
 from app.engine.scheduler import run_polling_loop
 from app.engine.worker_pool import DEFAULT_WORKER_POOL_SIZE, dispatch_loop, worker_loop
+# add to the imports
+from fastapi.middleware.cors import CORSMiddleware
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -84,3 +86,14 @@ app.include_router(runs.router)
 @app.get("/health")
 def health():
     return {"status": "ok"}
+app = FastAPI(title="Workflow Orchestrator API", version="0.1.0", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(workflows.router)
+app.include_router(runs.router)
