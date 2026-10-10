@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.database import get_db
 from app.engine.dag import has_cycle
 from app.models.entities import Task, TaskDependency, Workflow, WorkflowRun
+from app.models.enums import TriggerType, WorkflowRunStatus
 from app.schemas.run import WorkflowRunRead
 from app.schemas.workflow import (
     WorkflowCreate,
@@ -210,3 +211,41 @@ def list_workflow_runs(workflow_id: int, db: Session = Depends(get_db)):
         .order_by(WorkflowRun.triggered_at.desc())
         .all()
     )
+
+
+@router.post("/workflows/{workflow_id}/runs", response_model=WorkflowRunRead, status_code=201)
+def trigger_workflow_run(workflow_id: int, db: Session = Depends(get_db)):
+    """Manually trigger a run. Creates the row as PENDING with trigger_type=MANUAL;
+    the dispatch loop (app/engine/worker_pool.py) picks up any PENDING run, so
+    nothing in app/engine/ needs to change.
+
+    Respects max_active_runs the same way the cron scheduler does, so a manual
+    trigger can't be used to bypass it -- 409 if the limit is already reached.
+    """
+    workflow = db.query(Workflow).filter(Workflow.id == workflow_id).first()
+    if workflow is None:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    active = (
+        db.query(WorkflowRun)
+        .filter(
+            WorkflowRun.workflow_id == workflow_id,
+            WorkflowRun.status.in_([WorkflowRunStatus.PENDING, WorkflowRunStatus.RUNNING]),
+        )
+        .count()
+    )
+    if active >= workflow.max_active_runs:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Workflow already has {active} active run(s) (max_active_runs={workflow.max_active_runs})",
+        )
+
+    run = WorkflowRun(
+        workflow_id=workflow_id,
+        status=WorkflowRunStatus.PENDING,
+        trigger_type=TriggerType.MANUAL,
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return run

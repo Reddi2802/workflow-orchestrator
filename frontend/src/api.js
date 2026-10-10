@@ -1,6 +1,7 @@
 // Points at your local FastAPI server (uv run uvicorn app.main:app --reload).
-// Change this if you run the backend on a different host/port.
-const API_BASE = "http://localhost:8000/api/v1";
+// Override with VITE_API_URL in frontend/.env.local (e.g. to use another port);
+// .env.local is git-ignored by Vite's default .gitignore, so it won't be committed.
+const API_BASE = `${import.meta.env.VITE_API_URL ?? "http://localhost:8000"}/api/v1`;
 
 async function request(path, options = {}) {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -44,4 +45,14 @@ export function deleteWorkflow(id) {
 
 export function getWorkflowRuns(id) {
   return request(`/workflows/${id}/runs`);
+}
+
+// Week 5: one run with its task_runs nested (GET /runs/{id}).
+export function getRun(id) {
+  return request(`/runs/${id}`);
+}
+
+// Week 5: manual trigger (POST /workflows/{id}/runs). Returns the new PENDING run.
+export function triggerRun(workflowId) {
+  return request(`/workflows/${workflowId}/runs`, { method: "POST" });
 }
