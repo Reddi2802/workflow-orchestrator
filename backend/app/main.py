@@ -6,6 +6,8 @@ Combines pieces built independently by both of you:
 - Paramash's Week 1 CRUD routers (workflows, runs)
 - Hridhayansh's Week 1 cron polling loop
 - Hridhayansh's Week 4 dispatch loop + worker pool
+- Hridhayansh's Week 5 crash recovery (runs once at startup, before any
+  background loop starts pulling from the queue)
 
 All background work is launched as asyncio tasks via the lifespan hook, per
 the "engine runs in-process" decision (Section 2 of the reference docs) --
@@ -24,6 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1 import runs, workflows
 from app.core.database import SessionLocal
+from app.engine.recovery import recover_incomplete_runs
 from app.engine.scheduler import run_polling_loop
 from app.engine.worker_pool import DEFAULT_WORKER_POOL_SIZE, dispatch_loop, worker_loop
 
@@ -31,8 +34,39 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _recover_on_startup_sync(session_factory) -> list[int]:
+    """One-shot wrapper mirroring the session-open/close pattern every
+    other sync entry point in this codebase uses (_worker_cycle_sync,
+    poll_and_trigger_sync's callers, etc.) -- open a session, do the
+    (blocking) work, close it, regardless of outcome."""
+    db = session_factory()
+    try:
+        return recover_incomplete_runs(db)
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Runs to completion BEFORE any background task below is created --
+    # deliberate ordering, not an oversight. Recovery re-enqueues rows for
+    # WorkflowRuns that were already RUNNING when the process last died;
+    # if a worker were already dequeuing while recovery was still deciding
+    # what to re-enqueue, that's a real race. Blocking here removes it
+    # entirely rather than depending on recovery's internal dedup guards
+    # to paper over a concurrent run. asyncio.to_thread so this one-time
+    # blocking DB work doesn't stall the event loop during startup, same
+    # reasoning as every other sync DB call in this codebase.
+    recovered_run_ids = await asyncio.to_thread(_recover_on_startup_sync, SessionLocal)
+    if recovered_run_ids:
+        logger.info(
+            "Startup recovery: %d WorkflowRun(s) were still RUNNING from a "
+            "previous process -- reconciled: %s",
+            len(recovered_run_ids), recovered_run_ids,
+        )
+    else:
+        logger.info("Startup recovery: no incomplete WorkflowRuns found")
+
     stop_event = asyncio.Event()
 
     scheduler_task = asyncio.create_task(
