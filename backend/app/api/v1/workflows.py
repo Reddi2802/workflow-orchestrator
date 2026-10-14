@@ -225,6 +225,9 @@ def trigger_workflow_run(workflow_id: int, db: Session = Depends(get_db)):
     workflow = db.query(Workflow).filter(Workflow.id == workflow_id).first()
     if workflow is None:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    task_count = db.query(Task).filter(Task.workflow_id == workflow_id).count()
+    if task_count == 0:
+        raise HTTPException(status_code=400, detail="Workflow has no tasks to run")
 
     active = (
         db.query(WorkflowRun)
