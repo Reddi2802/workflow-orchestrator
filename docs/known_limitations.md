@@ -214,3 +214,18 @@ same way) fails in-flight work rather than resuming it.
 **Resolves:** would need shutdown-aware handling in the worker (detect
 shutdown, leave the row `RUNNING` or reset it, and don't record the
 child's interrupt as a task failure). Needs its own design pass.
+
+## 12. Zero-task workflows can still leave a `WorkflowRun` stuck `RUNNING`
+
+**Status:** open, partially mitigated.
+
+`POST /workflows/{id}/runs` rejects a workflow with no tasks (400, PR #19).
+The cron path (`scheduler.trigger_workflow_run`) has no such check, and
+`start_workflow_run` marks a zero-task run `RUNNING` without creating any
+`TaskRun`, so nothing ever finalizes it. It stays `RUNNING`, counting against
+`max_active_runs`, until the next restart, when `recover_incomplete_runs`
+finalizes it as `SUCCESS` (vacuously). Found by code reading 2026-10-15; not
+reproduced live.
+
+**Resolves:** guard in `start_workflow_run` (finalize or fail immediately
+when the workflow has no tasks), covering both trigger paths.
