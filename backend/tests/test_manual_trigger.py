@@ -69,3 +69,13 @@ def test_trigger_allowed_up_to_max_active_runs(client):
     assert client.post(f"/api/v1/workflows/{wf_id}/runs").status_code == 201
     assert client.post(f"/api/v1/workflows/{wf_id}/runs").status_code == 201
     assert client.post(f"/api/v1/workflows/{wf_id}/runs").status_code == 409
+def test_trigger_rejects_workflow_with_no_tasks(client):
+    resp = client.post("/api/v1/workflows", json={"name": "empty-wf"})
+    assert resp.status_code == 201
+    wf_id = resp.json()["id"]
+
+    resp = client.post(f"/api/v1/workflows/{wf_id}/runs")
+
+    assert resp.status_code == 400
+    # nothing was created, so it can't get stuck RUNNING
+    assert client.get(f"/api/v1/workflows/{wf_id}/runs").json() == []
