@@ -147,6 +147,15 @@ def poll_and_trigger_sync(db: Session) -> list[WorkflowRun]:
 
     triggered_runs = []
     for workflow in due_workflows:
+        if not workflow.tasks:
+            # known_limitations.md item 12. Matches the 400 that manual
+            # trigger gives for an empty workflow, and avoids writing a
+            # pointless SUCCESS run row on every cron tick. DEBUG, not INFO:
+            # no run is created, so this workflow is "due" again on every
+            # poll and an INFO line would repeat every poll interval forever.
+            logger.debug("Skipping workflow %s: it has no tasks", workflow.id)
+            continue
+
         active_count = _active_run_count(db, workflow.id)
         if active_count >= workflow.max_active_runs:
             logger.info(
