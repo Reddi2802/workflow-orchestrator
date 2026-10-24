@@ -19,8 +19,16 @@ of the project's "verify at the database level" standard.
 from datetime import datetime, timedelta
 
 from app.engine.scheduler import get_due_workflows, poll_and_trigger_sync
-from app.models.entities import Workflow, WorkflowRun
+from app.models.entities import Task, Workflow, WorkflowRun
 from app.models.enums import WorkflowRunStatus, TriggerType
+
+
+def _add_task(db, workflow):
+    """poll_and_trigger_sync skips workflows with no tasks (known_limitations
+    item 12), so tests that expect a trigger -- or that rely on
+    max_active_runs being the reason for a skip -- need at least one."""
+    db.add(Task(workflow_id=workflow.id, name="t1", command="exit 0"))
+    db.commit()
 
 
 def _make_workflow(db, **overrides):
@@ -74,6 +82,7 @@ def test_poll_and_trigger_creates_workflow_run(db_session):
         db_session,
         created_at=datetime.utcnow() - timedelta(minutes=2),
     )
+    _add_task(db_session, workflow)
 
     triggered = poll_and_trigger_sync(db_session)
 
@@ -86,6 +95,7 @@ def test_poll_and_trigger_creates_workflow_run(db_session):
 
 def test_poll_and_trigger_respects_max_active_runs(db_session):
     workflow = _make_workflow(db_session, max_active_runs=1)
+    _add_task(db_session, workflow)
 
     # Simulate a previous run that's still in flight.
     existing_run = WorkflowRun(

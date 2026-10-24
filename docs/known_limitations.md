@@ -225,15 +225,22 @@ child's interrupt as a task failure). Needs its own design pass.
 
 ## 12. Zero-task workflows can still leave a `WorkflowRun` stuck `RUNNING`
 
-**Status:** open, partially mitigated.
+**Status:** resolved (Week 6).
 
-`POST /workflows/{id}/runs` rejects a workflow with no tasks (400, PR #19).
-The cron path (`scheduler.trigger_workflow_run`) has no such check, and
-`start_workflow_run` marks a zero-task run `RUNNING` without creating any
-`TaskRun`, so nothing ever finalizes it. It stays `RUNNING`, counting against
-`max_active_runs`, until the next restart, when `recover_incomplete_runs`
-finalizes it as `SUCCESS` (vacuously). Found by code reading 2026-10-15; not
-reproduced live.
+`POST /workflows/{id}/runs` rejects a workflow with no tasks (400, PR #19),
+but the cron path (`scheduler.trigger_workflow_run`) had no such check, and
+`start_workflow_run` marked a zero-task run `RUNNING` without creating any
+`TaskRun`, so nothing ever finalized it. It stayed `RUNNING`, counting against
+`max_active_runs`, until the next restart. Found by code reading 2026-10-15.
 
-**Resolves:** guard in `start_workflow_run` (finalize or fail immediately
-when the workflow has no tasks), covering both trigger paths.
+Fixed at two layers, tested in `tests/test_zero_task_run.py`:
+- `start_workflow_run` finalizes a zero-task run immediately as `SUCCESS`
+  (vacuously true, same answer `recover_incomplete_runs` gives), so the engine
+  is safe whoever created the run.
+- `poll_and_trigger_sync` skips workflows with no tasks, so an empty cron
+  workflow does not write a pointless `SUCCESS` run on every tick. The skip is
+  logged at DEBUG only: no run is created, so the workflow is "due" again on
+  every poll and an INFO line would repeat forever.
+
+Side effect: two existing tests in `test_scheduler_integration.py` built
+task-less workflows and expected a trigger; they now add one task.

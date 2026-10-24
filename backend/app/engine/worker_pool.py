@@ -86,6 +86,28 @@ def start_workflow_run(db: Session, workflow_run: WorkflowRun) -> list[TaskRun]:
         return []
 
     tasks = workflow_run.workflow.tasks
+
+    if not tasks:
+        # known_limitations.md item 12. A workflow with no tasks has nothing
+        # to enqueue, so nothing would ever call _maybe_finalize_workflow_run
+        # and the run would sit at RUNNING forever, counting against
+        # max_active_runs. Finalize it here instead. SUCCESS because "every
+        # task succeeded" is vacuously true -- the same answer
+        # recover_incomplete_runs gives for such a run. POST /runs already
+        # rejects an empty workflow (400); this covers the cron path and any
+        # other caller that forgets to check.
+        now = datetime.utcnow()
+        workflow_run.status = WorkflowRunStatus.SUCCESS
+        workflow_run.started_at = now
+        workflow_run.completed_at = now
+        db.commit()
+        logger.warning(
+            "WorkflowRun %s: workflow %s has no tasks -- finalized as SUCCESS "
+            "without running anything",
+            workflow_run.id, workflow_run.workflow_id,
+        )
+        return []
+
     task_ids = [t.id for t in tasks]
     dependencies = (
         db.execute(
