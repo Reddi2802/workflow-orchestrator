@@ -7,3 +7,5 @@ dist/
 *.db
 .DS_Store
 protection.json
+# generated timing dataset (scripts/check_timing_dataset.py)
+backend/data/
