@@ -3,7 +3,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     Boolean, CheckConstraint, DateTime, ForeignKey, Integer,
-    JSON, String, UniqueConstraint, func,
+    JSON, String, UniqueConstraint, func, text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -125,5 +125,23 @@ class TaskRun(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     error_message: Mapped[str | None] = mapped_column(String, nullable=True)
     checkpoint_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # When this row was inserted (UTC, naive -- same convention as started_at /
+    # completed_at). started_at - created_at is the time the attempt spent
+    # waiting for a worker.
+    # Stamped by the application with datetime.utcnow (the Python-side
+    # `default`), deliberately the SAME clock that stamps started_at, so the
+    # subtraction never mixes the app's clock with the database server's
+    # (Postgres in Docker can drift from the host, e.g. after the machine
+    # sleeps). The server_default is only a fallback for rows inserted outside
+    # the ORM, and uses clock_timestamp() rather than now() because now() is
+    # the transaction start, which would be stale across the retry backoff sleep.
+    # Nullable on purpose: rows that existed before this column was added have
+    # no honest value, and NULL says so (a backfill would fake a queue wait).
+    created_at: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        server_default=text("timezone('utc', clock_timestamp())"),
+        nullable=True,
+    )
 
     workflow_run: Mapped["WorkflowRun"] = relationship(back_populates="task_runs")
