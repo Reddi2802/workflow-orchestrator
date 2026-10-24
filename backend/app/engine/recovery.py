@@ -60,13 +60,16 @@ planning:
         duplicate (if the row actually was already in the queue and
         survived). That's an accepted, documented trade-off, not
         silently ignored: a duplicate dequeue of the same task_run_id
-        hits process_task_run's own validate_transition call on whatever
-        status that row is ALREADY in by the time the second dequeue is
-        processed (e.g. validate_transition(RUNNING, RUNNING) or
-        validate_transition(SUCCESS, RUNNING) are both invalid) --
-        process_task_run raises ValueError, the worker's own try/except
-        catches and logs it, nothing is corrupted. A fail-safe outcome
-        (one wasted queue slot, one log line), not a fail-silent one.
+        loses the atomic PENDING -> RUNNING claim in
+        worker_pool._claim_task_run (a single conditional UPDATE ... WHERE
+        status = PENDING, so exactly one worker can win it, even if two
+        dequeue the two copies at the same instant). The loser's claim
+        matches zero rows, process_task_run logs one INFO line and
+        returns without executing anything or touching the row. A
+        fail-safe outcome (one wasted queue slot, one log line), not a
+        fail-silent one. (Before Week 6 this relied on validate_transition
+        raising ValueError, which was NOT safe when two workers read the
+        row while it was still PENDING -- see known_limitations.md item 9.)
         Building real queue-level idempotency (dedup keys, etc.) to avoid
         this entirely is beyond this project's scope -- see
         known_limitations.md.

@@ -40,7 +40,7 @@ import subprocess
 import time
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -291,21 +291,74 @@ def _maybe_finalize_workflow_run(db: Session, workflow_run_id: int) -> None:
     db.commit()
 
 
+def _claim_task_run(db: Session, task_run_id: int) -> TaskRun | None:
+    """Atomically move a TaskRun PENDING -> RUNNING and return it, or return
+    None if this caller did not win the claim (row missing, or no longer
+    PENDING because another worker already took it or it already finished).
+
+    known_limitations.md item 9: the same task_run_id can be in the queue
+    twice (recovery re-enqueues every PENDING row unconditionally). The old
+    code read the row with db.get(), checked its status in Python, and
+    committed RUNNING as a separate step, so two workers holding two copies
+    of the id could both see PENDING and both run the command. Here the
+    check and the write are ONE statement:
+
+        UPDATE task_runs SET status='RUNNING', started_at=...
+        WHERE id = :id AND status = 'PENDING'
+
+    Postgres row-locks the matching row for the update. A second worker's
+    identical UPDATE waits for the first one's commit, re-evaluates the WHERE
+    clause against the new committed row (READ COMMITTED), no longer
+    matches, and reports rowcount 0. Exactly one caller gets rowcount 1.
+
+    synchronize_session=False: the ORM must not "evaluate" this UPDATE
+    against objects already sitting in this Session, because a stale
+    in-session copy that still says PENDING would be marked RUNNING in
+    memory even though the database refused the update. The row is re-read
+    from the database with populate_existing instead.
+    """
+    # Not needed for correctness (the WHERE clause is the real guard), but
+    # this is the one place PENDING -> RUNNING is performed, so keep it tied
+    # to the transition table: if VALID_TRANSITIONS ever stops allowing it,
+    # this fails loudly instead of silently diverging.
+    validate_transition(TaskStatus.PENDING, TaskStatus.RUNNING)
+
+    result = db.execute(
+        update(TaskRun)
+        .where(TaskRun.id == task_run_id, TaskRun.status == TaskStatus.PENDING)
+        .values(status=TaskStatus.RUNNING, started_at=datetime.utcnow())
+        .execution_options(synchronize_session=False)
+    )
+    db.commit()
+
+    if result.rowcount == 0:
+        return None
+    return db.get(TaskRun, task_run_id, populate_existing=True)
+
+
 def process_task_run(db: Session, task_run_id: int) -> None:
-    """Everything that happens to a single dequeued task_run_id: mark
-    RUNNING, execute, then branch on success / retryable failure /
-    permanent failure. Each branch ends by touching the two things that
-    make the run move forward: the DAG walk and the finalize check."""
-    task_run = db.get(TaskRun, task_run_id)
+    """Everything that happens to a single dequeued task_run_id: claim it
+    (PENDING -> RUNNING, atomically -- see _claim_task_run), execute, then
+    branch on success / retryable failure / permanent failure. Each branch
+    ends by touching the two things that make the run move forward: the DAG
+    walk and the finalize check.
+
+    A dequeued id that can't be claimed is skipped, not an error: it is
+    either a duplicate of an id another worker already took, or a late
+    duplicate of a row that already finished. Nothing is executed and the
+    row is left untouched."""
+    task_run = _claim_task_run(db, task_run_id)
     if task_run is None:
-        logger.error("Dequeued task_run_id %s does not exist -- dropping", task_run_id)
+        existing = db.get(TaskRun, task_run_id, populate_existing=True)
+        if existing is None:
+            logger.error("Dequeued task_run_id %s does not exist -- dropping", task_run_id)
+        else:
+            logger.info(
+                "Dequeued task_run_id %s is %s, not PENDING -- duplicate dequeue, skipping",
+                task_run_id, existing.status.value,
+            )
         return
     task = db.get(Task, task_run.task_id)
-
-    validate_transition(task_run.status, TaskStatus.RUNNING)
-    task_run.status = TaskStatus.RUNNING
-    task_run.started_at = datetime.utcnow()
-    db.commit()
 
     succeeded, error_message = _execute_command(task.command)
 

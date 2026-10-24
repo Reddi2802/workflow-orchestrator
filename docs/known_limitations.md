@@ -138,8 +138,8 @@ a real requirement, it needs its own design pass, not a quick patch onto
 
 ## 9. Recovery's handling of a `PENDING` task can occasionally double-enqueue
 
-**Status:** open, accepted trade-off, not a bug to silently fix later
-without reading this first.
+**Status:** double-enqueue itself is an accepted trade-off (still true). The
+double-*execution* hole found 2026-10-15 is resolved (Week 6, see below).
 
 Recovery cannot tell "this `PENDING` row was never enqueued" apart from
 "this row was enqueued, and Redis — a separate process from the crashed
@@ -147,24 +147,32 @@ app — still has it safely sitting in the queue." It re-enqueues every
 `PENDING` row unconditionally. If the row actually was already queued,
 this produces a genuine duplicate `task_run_id` in the queue.
 
-**Why this is accepted rather than fixed:** in the common case, the second
-dequeue of the same `task_run_id` happens after the first worker has already
-committed `RUNNING`, so `process_task_run`'s `validate_transition` call
-against the row's current status is an invalid transition, which raises,
-which the worker's own `try/except` catches and logs. The outcome is one
-wasted queue slot and a log line, not data corruption. Building real
-queue-level idempotency (dedup keys, etc.) to close this entirely is judged
-beyond this project's scope.
+**Why the duplicate queue entry is accepted rather than fixed:** since the
+Week 6 fix below, a duplicate dequeue is harmless. The second worker's claim
+matches zero rows, so `process_task_run` logs one INFO line, executes
+nothing and leaves the row alone. The cost is one wasted queue slot.
+Building real queue-level idempotency (dedup keys, etc.) to avoid even that
+is judged beyond this project's scope.
 
-**Known hole in that reasoning (found 2026-10-15):** `process_task_run`
-reads the row with `db.get` (no row lock) and the status check and the
-`RUNNING` commit are not atomic. With two workers, two copies of the same
-`task_run_id` dequeued at nearly the same moment can both pass the check
-while the row is still `PENDING`, and the command then executes twice. This
-is narrow but real. The fix is a row lock (`SELECT ... FOR UPDATE`) or a
-conditional `UPDATE ... WHERE status = 'PENDING'` inside `process_task_run`
-— a change to already-merged Week 4 code, deliberately not attempted in the
-recovery PR.
+**Resolved hole (found 2026-10-15, fixed Week 6):** `process_task_run` used
+to read the row with an unlocked `db.get`, check its status in Python, and
+commit `RUNNING` as a separate step. Two workers dequeuing two copies of the
+same `task_run_id` at nearly the same moment could both see `PENDING`, and
+the command then ran twice. (The earlier claim that a duplicate dequeue was
+always caught by `validate_transition` was only true when the first worker
+had already committed `RUNNING`.)
+
+The fix is `_claim_task_run` in `worker_pool.py`: one conditional
+`UPDATE ... WHERE id = :id AND status = 'PENDING'`, and only the caller that
+sees `rowcount == 1` goes on to execute. Postgres serializes the two
+UPDATEs on the row lock, so exactly one caller wins. Covered by
+`tests/test_duplicate_dequeue.py`, which reproduces the interleaving (two
+sessions, one holding a stale `PENDING` read; plus a two-thread race) and
+fails on the old code. Behaviour change: a duplicate dequeue is now a quiet
+skip instead of a `ValueError` caught by the worker's catch-all.
+
+Not covered: a command that was already started by a worker that then died
+(item 8), which recovery will still re-run.
 
 ## 10. Recovery decisions — review outcome
 
@@ -189,7 +197,7 @@ The four review items and their outcome:
   stayed 1). Still the one deliberate break of the Week 3 transition rules;
   reviewers should read its justification in `recovery.py`.
 - **D — Possible double-enqueue of a `PENDING` task.** **Accepted** — see
-  item 9, including its known hole.
+  item 9. The double-execution hole noted there was fixed in Week 6.
 
 ## 11. Graceful shutdown fails in-flight tasks instead of recovering them
 
