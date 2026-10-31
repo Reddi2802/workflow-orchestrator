@@ -9,3 +9,6 @@ dist/
 protection.json
 # generated timing dataset (scripts/check_timing_dataset.py)
 backend/data/
+
+# trained duration models (scripts/train_predictor.py)
+backend/models/

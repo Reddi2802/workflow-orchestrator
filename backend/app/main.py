@@ -24,7 +24,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.v1 import runs, workflows
+from app.api.v1 import predictions, runs, workflows
 from app.core.database import SessionLocal
 from app.engine.recovery import recover_incomplete_runs
 from app.engine.scheduler import run_polling_loop
@@ -120,6 +120,7 @@ app.add_middleware(
 
 app.include_router(workflows.router)
 app.include_router(runs.router)
+app.include_router(predictions.router)
 
 
 @app.get("/health")
