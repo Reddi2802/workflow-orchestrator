@@ -23,9 +23,18 @@ dev = [
     "httpx>=0.28.1",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
     "ruff>=0.15.0",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 pythonpath = ["."]
+
+[tool.coverage.run]
+source = ["app"]
+branch = false
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true

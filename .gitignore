@@ -12,3 +12,8 @@ backend/data/
 
 # trained duration models (scripts/train_predictor.py)
 backend/models/
+
+# coverage output
+.coverage
+htmlcov/
+coverage.xml

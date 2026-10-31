@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    # The tests hit a REAL Postgres and Redis (no mocks), so CI starts the same
+    # two services docker-compose.yml does, with the same credentials the app hardcodes.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: orchestrator
+          POSTGRES_PASSWORD: devpassword
+          POSTGRES_DB: orchestrator
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U orchestrator"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen
+      - run: uv run alembic upgrade head
+      - name: Tests with coverage (fails under 85% total)
+        run: uv run pytest -q --cov=app --cov-report=term-missing --cov-fail-under=85
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
