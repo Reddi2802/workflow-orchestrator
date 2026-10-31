@@ -244,3 +244,46 @@ Fixed at two layers, tested in `tests/test_zero_task_run.py`:
 
 Side effect: two existing tests in `test_scheduler_integration.py` built
 task-less workflows and expected a trigger; they now add one task.
+
+## 13. Week 6 decisions, and what the timing dataset can and cannot show
+
+**Status:** open, informational. Re-check the numbers below on your own data
+with `scripts/check_timing_dataset.py` before relying on them.
+
+Decisions made for Week 6:
+- **Edge cases:** fix items 9 and 12; item 11 stays documented only.
+- **Zero-task runs:** both layers (engine finalizes, cron poll skips); see item 12.
+- **Timing data:** commands from several families (sleep, CPU loop, sort,
+  sleep + CPU) whose runtime is set by a parameter in the command text, scaled
+  by a quick calibration of the machine. Not plain `sleep N` with jitter.
+- **Queue wait:** `TaskRun.created_at` (nullable, UTC, same clock as
+  `started_at`) so queue wait is `started_at - created_at`. Rows from before the
+  migration have NULL and are dropped by `build_dataset` by default.
+
+What the first generated dataset (481 successful TaskRuns) showed:
+- **The data is easy.** The generator runs each workflow several times with
+  identical commands, so a task's own previous mean duration
+  (`prev_mean_duration`) correlates about 0.99 with its duration, and a plain
+  3-feature least-squares fit on a time-ordered split reaches R2 about 0.97.
+  Any Week 8 model must beat "predict this task's previous mean" to show it
+  learned anything. A good score on this data says little about real workloads.
+- **Queueing, not execution, is the larger delay.** Median queue wait was about
+  as long as median execution time (both about 3.3s) because several workflows
+  compete for 2 workers. If "bottleneck" means waiting, the target should be
+  queue wait or end-to-end latency, not execution duration alone.
+- **`attempt_number` is constant** in the dataset (only first attempts
+  succeeded), so it carries no signal.
+- **Hour-of-day and day-of-week are deliberately excluded:** a dataset made in
+  one sitting has a constant hour.
+- `running_at_start` counts every TaskRun running at that instant, including
+  rows that are not part of the dataset.
+- A recovered task's own duration is clean (`started_at` is overwritten on the
+  re-run), but a run-level duration would include the crash downtime (item 10 B).
+
+## 14. `TaskRun.created_at` is not exposed by the API
+
+**Status:** open, decide in the Week 7 joint session.
+
+`TaskRunRead` in `app/schemas/run.py` has no `created_at`, so the dashboard and
+any prediction endpoint cannot show queue wait. Adding it is one line in
+Paramash's schema file plus a check that the frontend tolerates the new field.
